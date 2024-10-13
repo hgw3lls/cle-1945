@@ -39,7 +39,7 @@ To run this project locally, follow the steps below:
 1. **Clone the repository**:
 
    ```bash
-   git clone https://github.com/yourusername/leaflet-map-caching.git
+   git clone https://github.com/JohnCamelTry/leaflet-map-caching.git
    cd leaflet-map-caching
    
 2. **Open the project**:
