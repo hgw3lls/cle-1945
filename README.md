@@ -41,4 +41,15 @@ To run this project locally, follow the steps below:
    ```bash
    git clone https://github.com/yourusername/leaflet-map-caching.git
    cd leaflet-map-caching
+   
+2. **Open the project**:
+
+Open index.html in your browser.
+
+3. **Developer Tools**:
+
+To verify that map tiles are being cached correctly, open your browser’s developer tools (press F12).
+Navigate to the Applications tab.
+Under Storage, expand the IndexedDB section.
+Look for the database associated with this project, and you’ll be able to inspect the cached tiles within it.
 
