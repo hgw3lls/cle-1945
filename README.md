@@ -1,4 +1,4 @@
-# Leaflet Map with Tile Caching
+# Leaflet and IndexedDB caching tiles  
 This project is a web application that utilizes the [Leaflet.js](https://leafletjs.com/) library for interactive maps and adds functionality for caching map tiles using `IndexedDB`.
 ## Features
 
