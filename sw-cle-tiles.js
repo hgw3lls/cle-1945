@@ -19,11 +19,12 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Cache-first fetch
+// Cache-first for Esri tiles; allow opaque (no-cors) fetches
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
   if (!TILE_HOSTS.includes(url.hostname)) return;
+
   event.respondWith(
     caches.open(TILE_CACHE).then(async cache => {
       const cached = await cache.match(req, { ignoreVary: true, ignoreSearch: false });
@@ -39,7 +40,7 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Prefetch/seed
+// Optional: handle explicit prefetch requests from the page
 self.addEventListener('message', (event) => {
   const data = event.data || {};
   if (data.type === 'seedTiles' && Array.isArray(data.urls)) {
@@ -51,7 +52,7 @@ self.addEventListener('message', (event) => {
             const req = new Request(u, { mode: 'no-cors', cache: 'reload' });
             const res = await fetch(req);
             try { await cache.put(req, res.clone()); } catch(e) {}
-          } catch (e) { /* ignore */ }
+          } catch (e) { /* ignore individual failures */ }
         }
       })()
     );
