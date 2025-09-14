@@ -3400,7 +3400,6 @@ document.addEventListener('DOMContentLoaded', function(){
   }
 });
 </script>
-
 <script>
 // Ensure the map's existing base layer is replaced by a cached one if it was created before our override
 (function(){
@@ -3446,7 +3445,6 @@ document.addEventListener('DOMContentLoaded', function(){
   window.ensureCachedBaseLayer = ensureCachedBaseLayer;
 })();
 </script>
-
 <script>
 document.addEventListener('DOMContentLoaded', function(){
   function getMapRef(){
@@ -3478,6 +3476,391 @@ document.addEventListener('DOMContentLoaded', function(){
       }
     }, { once: false });
   }
+});
+</script>
+<script>
+// Install Hybrid (Imagery + Reference labels) and Streets basemaps using cached tile layers.
+// Also force the map to start at the Home View.
+(function(){
+  function getMapRef(){
+    if (window.map && typeof map.eachLayer === 'function') return map;
+    if (window._map && typeof _map.eachLayer === 'function') return _map;
+    return null;
+  }
+
+  // Create cached tile layers for Esri basemaps
+  function createLayers(){
+    const imagery = new L.TileLayer.Cached(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom: 19, dbName: 'cle-1945-cache', storeName: 'tiles-imagery' }
+    );
+    // Transparent reference labels & boundaries
+    const refLabels = new L.TileLayer.Cached(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom: 19, dbName: 'cle-1945-cache', storeName: 'tiles-labels' }
+    );
+    const refRoads = new L.TileLayer.Cached(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom: 19, dbName: 'cle-1945-cache', storeName: 'tiles-roads' }
+    );
+    const hybrid = L.layerGroup([imagery, refLabels, refRoads]);
+
+    const streets = new L.TileLayer.Cached(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom: 19, dbName: 'cle-1945-cache', storeName: 'tiles-streets' }
+    );
+
+    return { imagery, refLabels, refRoads, hybrid, streets };
+  }
+
+  // Remove any existing non-cached base tile layers to avoid double-drawing
+  function removeNonCachedBaseLayers(m){
+    const toRemove = [];
+    m.eachLayer(function(l){
+      if ((l instanceof L.TileLayer) && !(l instanceof L.TileLayer.Cached)) {
+        toRemove.push(l);
+      }
+    });
+    toRemove.forEach(l => m.removeLayer(l));
+  }
+
+  // Ensure home view (downtown Cleveland) and set default zoom
+  const HOME_CENTER = [41.4993, -81.6944];
+  const HOME_ZOOM = 13; // start zoom
+
+  function ensureHomeView(m){
+    try{
+      if (m && typeof m.setView === 'function') {
+        m.setView(HOME_CENTER, HOME_ZOOM);
+        if (typeof m.closePopup === 'function') m.closePopup();
+      }
+    }catch(e){ console.warn('Home view set failed', e); }
+  }
+
+  function installHybrid(){
+    const m = getMapRef();
+    if (!m || !window.L || !L.TileLayer || !L.TileLayer.Cached) return false;
+
+    removeNonCachedBaseLayers(m);
+
+    // Build layers
+    const layers = createLayers();
+
+    // Add HYBRID by default
+    layers.hybrid.addTo(m);
+
+    // Make a layer control to toggle
+    if (!window._baseLayerControl) {
+      window._baseLayerControl = L.control.layers(
+        { 'Hybrid (Imagery + Labels)': layers.hybrid, 'Streets': layers.streets },
+        null,
+        { collapsed: false }
+      ).addTo(m);
+    } else {
+      try {
+        window._baseLayerControl.addBaseLayer(layers.hybrid, 'Hybrid (Imagery + Labels)');
+        window._baseLayerControl.addBaseLayer(layers.streets, 'Streets');
+      } catch(e){}
+    }
+
+    // Store refs
+    window._layersHybrid = layers.hybrid;
+    window._layersStreets = layers.streets;
+
+    // Force home start
+    ensureHomeView(m);
+    return true;
+  }
+
+  // Try repeatedly until Leaflet + map are ready
+  var attempts = 0;
+  var timer = setInterval(function(){
+    if (installHybrid() || attempts++ > 100) { // up to ~10s
+      clearInterval(timer);
+    }
+  }, 100);
+
+  // Upgrade the Home button to use this zoom
+  document.addEventListener('DOMContentLoaded', function(){
+    var btn = document.getElementById('homeBtn');
+    if (btn) {
+      btn.addEventListener('click', function(){
+        var m = getMapRef();
+        if (m) {
+          m.setView(HOME_CENTER, HOME_ZOOM);
+          if (typeof m.closePopup === 'function') m.closePopup();
+        }
+      });
+    }
+  });
+})();
+</script>
+<script>
+// Robust seeding across ALL visible cached layers, with safer zoom math and diagnostics.
+(function(){
+  function getMapRef(){
+    if (window.map && typeof map.eachLayer === 'function') return map;
+    if (window._map && typeof _map.eachLayer === 'function') return _map;
+    return null;
+  }
+
+  // Find all visible Cached tile layers on the map
+  function findCachedLayers(m){
+    const layers = [];
+    m.eachLayer(function(l){
+      if (l instanceof L.TileLayer && l instanceof L.TileLayer.Cached) {
+        // If layer is part of a LayerGroup (hybrid), it's still directly on map when visible
+        layers.push(l);
+      }
+    });
+    return layers;
+  }
+
+  // Count how many tile URLs would be generated for bounds/z range (diagnostic only)
+  function countTilesFor(bounds, minZoom, maxZoom){
+    let n = 0;
+    for (let z = minZoom; z <= maxZoom; z++) {
+      const nw = this._map.project(bounds.getNorthWest(), z).divideBy(256).floor();
+      const se = this._map.project(bounds.getSouthEast(), z).divideBy(256).floor();
+      const dx = (se.x - nw.x + 1);
+      const dy = (se.y - nw.y + 1);
+      if (dx > 0 && dy > 0) n += dx * dy;
+    }
+    return n;
+  }
+
+  // Patch the existing Seed button to a stronger handler
+  document.addEventListener('DOMContentLoaded', function(){
+    var seedBtn = document.getElementById('seedView');
+    if (!seedBtn) return;
+    seedBtn.addEventListener('click', async function(){
+      const m = getMapRef();
+      if (!m) return alert('Map not ready.');
+
+      // Ensure map has correct size
+      if (typeof m.invalidateSize === 'function') m.invalidateSize();
+
+      const layers = findCachedLayers(m);
+      if (!layers.length) return alert('No cached tile layers are active yet. Try switching basemaps or wait a moment.');
+
+      const zNow = Math.max(0, Math.floor(m.getZoom() || 0));
+      const minZ = zNow;
+      const maxZ = Math.min(zNow + 2, 19);
+      const b = m.getBounds();
+
+      seedBtn.disabled = True = true; seedBtn.textContent = 'Seeding...';
+
+      let totalTiles = 0, totalSaved = 0;
+      try{
+        for (const layer of layers) {
+          const layerMax = Math.min(maxZ, layer.options && layer.options.maxZoom || 19);
+          // quick estimate of how many tiles this layer will process
+          try {
+            totalTiles += countTilesFor.call(layer, b, minZ, layerMax);
+          } catch(e) {}
+
+          const saved = await layer.seedBBox(b, minZ, layerMax);
+          totalSaved += saved;
+        }
+        alert('Estimated tiles in view: ~' + totalTiles + '\nSaved (new or already cached): ' + totalSaved + '\nRange z' + minZ + 'â€“z' + maxZ);
+      }catch(e){
+        console.error(e);
+        alert('Seeding failed: ' + (e && e.message ? e.message : e));
+      }finally{
+        seedBtn.disabled = false; seedBtn.textContent = 'Save tiles in view';
+      }
+    }, { passive: true });
+  });
+
+  // Also patch clear to target all cached layers' DBs
+  document.addEventListener('DOMContentLoaded', function(){
+    var clearBtn = document.getElementById('clearCache');
+    if (!clearBtn) return;
+    clearBtn.addEventListener('click', async function(){
+      const m = getMapRef();
+      if (!m) return alert('Map not ready.');
+      const layers = findCachedLayers(m);
+      if (!layers.length) return alert('No cached tile layers to clear.');
+      clearBtn.disabled = true; clearBtn.textContent = 'Clearing...';
+      try{
+        for (const layer of layers) {
+          if (typeof layer.clearCache === 'function') await layer.clearCache();
+        }
+        alert('Tile cache cleared for active basemap layers.');
+      }catch(e){
+        console.error(e);
+        alert('Clear failed.');
+      }finally{
+        clearBtn.disabled = false; clearBtn.textContent = 'Clear tile cache';
+      }
+    }, { passive: true });
+  });
+})();
+</script>
+<script>
+// --- Service Worker registration for tile caching (cache-first) ---
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function() {
+    navigator.serviceWorker.register('./sw-cle-tiles.js').then(function(reg) {
+      console.log('ServiceWorker registered:', reg.scope);
+    }).catch(function(err) {
+      console.warn('ServiceWorker registration failed:', err);
+    });
+  });
+}
+
+// Helper: compute tile URLs for current bounds/zoom for visible basemap layers
+function getVisibleTileUrlsForView(mapRef, minZoom, maxZoom){
+  const urls = [];
+  const zMin = Math.max(0, Math.floor(minZoom));
+  const zMax = Math.max(zMin, Math.floor(maxZoom));
+  const b = mapRef.getBounds();
+  const layers = [];
+  mapRef.eachLayer(l => {
+    if (l instanceof L.TileLayer && l.getTileUrl) layers.push(l);
+  });
+  for (let z = zMin; z <= zMax; z++) {
+    const nw = mapRef.project(b.getNorthWest(), z).divideBy(256).floor();
+    const se = mapRef.project(b.getSouthEast(), z).divideBy(256).floor();
+    for (let x = nw.x; x <= se.x; x++) {
+      for (let y = nw.y; y <= se.y; y++) {
+        layers.forEach(l => {
+          let u = l.getTileUrl({x, y, z});
+          if (u.indexOf('{s}') !== -1) u = u.replace('{s}', 'a');
+          urls.append ? urls.append(u) : urls.push(u);
+        });
+      }
+    }
+  }
+  return urls;
+}
+
+// Wire sidebar seed button to prefetch via Service Worker (no-cors, cache-first)
+document.addEventListener('DOMContentLoaded', function(){
+  var seedBtn = document.getElementById('seedView');
+  if (!seedBtn) return;
+  seedBtn.addEventListener('click', async function(){
+    var m = window.map || window._map;
+    if (!m) return alert('Map not ready.');
+    const z = Math.max(0, Math.floor(m.getZoom() || 0));
+    const urls = getVisibleTileUrlsForView(m, z, Math.min(z+2, 19));
+    if (!urls.length) return alert('No tiles computed.');
+    seedBtn.disabled = true; seedBtn.textContent = 'Seeding via SW...';
+    try {
+      const ctrl = await navigator.serviceWorker.ready;
+      if (ctrl && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'seedTiles', urls });
+        alert('Seeding started for ~' + urls.length + ' tiles. Keep this page open until it finishes fetching in the background.');
+      } else {
+        // Fallback: trigger fetches directly (will be intercepted by SW fetch handler and cached)
+        await Promise.all(urls.map(u => fetch(u, { mode: 'no-cors', cache: 'reload' }).catch(()=>null)));
+        alert('Requested ~' + urls.length + ' tiles for caching.');
+      }
+    } catch(e) {
+      console.error(e);
+      alert('Could not start seeding via Service Worker.');
+    } finally {
+      seedBtn.disabled = false; seedBtn.textContent = 'Save tiles in view';
+    }
+  }, { passive: true });
+});
+</script>
+
+<script>
+// ---------- Protocol check & UI notice ----------
+(function(){
+  function ensureNotice(){
+    var sb = document.getElementById('sidebar');
+    if (!sb) return;
+    var note = document.createElement('div');
+    note.id = 'swNotice';
+    note.style.cssText = 'font-size:12px;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;padding:8px;border-radius:8px;margin-bottom:8px;display:none;';
+    note.innerHTML = '<b>Offline caching disabled:</b> This page is opened via <code>file://</code>. Run a local server (e.g., <code>python -m http.server 5500</code>) and open <code>http://localhost:5500</code> to enable Service Worker tile caching.';
+    sb.insertBefore(note, sb.firstChild);
+  }
+  function showNotice(show){
+    var n = document.getElementById('swNotice');
+    if (n) n.style.display = show ? 'block' : 'none';
+  }
+  function disableSeedButtons(disabled){
+    var seed = document.getElementById('seedView');
+    if (seed) { seed.disabled = disabled; seed.title = disabled ? 'Enable by serving over http:// or https://' : ''; }
+  }
+  ensureNotice();
+  var isHttp = location.protocol === 'http:' || location.protocol === 'https:';
+  if (!isHttp) { showNotice(true); disableSeedButtons(true); }
+  window._isHttp = isHttp;
+})();
+
+// ---------- Robust map detection ----------
+function getMapRef(){
+  // Common globals first
+  if (window.map && typeof window.map.getZoom === 'function' && window.map instanceof L.Map) return window.map;
+  if (window._map && typeof window._map.getZoom === 'function' && window._map instanceof L.Map) return window._map;
+  // Fallback: scan globals (last resort)
+  for (const k in window){
+    try{
+      const v = window[k];
+      if (v && typeof v.getZoom === 'function' && typeof v.getBounds === 'function' && typeof v.setView === 'function') {
+        return v; // likely a Leaflet map
+      }
+    } catch(e){}
+  }
+  return null;
+}
+
+// ---------- Guard seed handler (Service Worker path) ----------
+document.addEventListener('DOMContentLoaded', function(){
+  var seedBtn = document.getElementById('seedView');
+  if (!seedBtn) return;
+  seedBtn.addEventListener('click', async function(){
+    var m = getMapRef();
+    if (!m || typeof m.getZoom !== 'function') {
+      console.warn('Map not ready or not found.');
+      return alert('Map not ready yet. Try again in a moment.');
+    }
+    if (!window._isHttp) {
+      return alert('To cache tiles, run this page over http(s). See the yellow notice at the top of the sidebar.');
+    }
+    try{
+      const z = Math.max(0, Math.floor(m.getZoom()));
+      const b = m.getBounds();
+      const layers = [];
+      m.eachLayer(function(l){
+        if (l instanceof L.TileLayer && typeof l.getTileUrl === 'function') layers.push(l);
+      });
+      if (!layers.length) return alert('No basemap layers active to cache.');
+      // Build URLs for z..z+2
+      const urls = [];
+      for (let Z=z; Z<=Math.min(z+2, 19); Z++){
+        const nw = m.project(b.getNorthWest(), Z).divideBy(256).floor();
+        const se = m.project(b.getSouthEast(), Z).divideBy(256).floor();
+        for (let x=nw.x; x<=se.x; x++){
+          for (let y=nw.y; y<=se.y; y++){
+            for (const l of layers){
+              let u = l.getTileUrl({x,y,z:Z});
+              if (u.indexOf('{s}') !== -1) u = u.replace('{s}', 'a');
+              urls.push(u);
+            }
+          }
+        }
+      }
+      if (!urls.length) return alert('Computed 0 tile URLs for this view.');
+      seedBtn.disabled = true; seedBtn.textContent = 'Seeding...';
+      const ctrl = await navigator.serviceWorker.ready;
+      if (!ctrl || !navigator.serviceWorker.controller){
+        console.warn('Service worker not controlling this page yet.');
+      }
+      // Fire off fetches (SW fetch handler will cache with no-cors)
+      await Promise.all(urls.map(u => fetch(u, { mode:'no-cors', cache:'reload' }).catch(()=>null)));
+      alert('Requested ~' + urls.length + ' tiles for caching (zoom ' + z + ' to ' + Math.min(z+2,19) + ').');
+    } catch(e){
+      console.error(e);
+      alert('Seeding failed: ' + (e && e.message ? e.message : e));
+    } finally {
+      seedBtn.disabled = false; seedBtn.textContent = 'Save tiles in view';
+    }
+  });
 });
 </script>
 </body>
